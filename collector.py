@@ -8,6 +8,7 @@ Usage (called from main.py):
     collect_channel("UCxxxxxx", max_pages=5, fetch_comments=True)
 """
 import json
+import re
 import time
 from typing import Optional
 
@@ -40,13 +41,27 @@ def resolve_channel_id(identifier: str) -> Optional[str]:
       - Raw channel ID (starts with UC)
       - @handle  (e.g. @mkbhd)
       - Custom URL slug (e.g. mkbhd)
+      - Full YouTube URLs (e.g., https://youtube.com/channel/UC...)
     Returns the channel_id string or None.
     """
-    yt = _build_youtube()
+    identifier = identifier.strip()
 
-    # Already a channel ID
-    if identifier.startswith("UC") and len(identifier) == 24:
-        return identifier
+    # 1. Try to extract raw channel ID (UC followed by 22 alphanumeric/dash/underscore chars)
+    channel_id_match = re.search(r'(UC[a-zA-Z0-9_-]{22})', identifier)
+    if channel_id_match:
+        return channel_id_match.group(1)
+
+    # 2. Extract handle or username from URL if present
+    if "youtube.com" in identifier or "youtu.be" in identifier:
+        match = re.search(r'(?:@|c/|user/)([^/?#]+)', identifier)
+        if match:
+            identifier = match.group(1)
+        else:
+            parts = identifier.rstrip("/").split("/")
+            if parts:
+                identifier = parts[-1]
+
+    yt = _build_youtube()
 
     # Handle @handle or plain slug
     handle = identifier.lstrip("@")
@@ -63,6 +78,7 @@ def resolve_channel_id(identifier: str) -> Optional[str]:
             return items[0]["snippet"]["channelId"]
     except HttpError as e:
         console.print(f"[red]API error resolving channel: {e}[/red]")
+        raise RuntimeError(f"YouTube API error resolving channel handle: {e.reason or e}")
     return None
 
 
@@ -78,12 +94,12 @@ def fetch_channel_details(channel_id: str) -> Optional[dict]:
         ).execute()
     except HttpError as e:
         console.print(f"[red]API error fetching channel: {e}[/red]")
-        return None
+        raise RuntimeError(f"YouTube API error fetching channel details: {e.reason or e}")
 
     items = resp.get("items", [])
     if not items:
         console.print(f"[red]Channel not found: {channel_id}[/red]")
-        return None
+        raise RuntimeError(f"YouTube channel {channel_id} was not found.")
 
     item = items[0]
     snippet = item.get("snippet", {})
@@ -122,7 +138,7 @@ def fetch_video_list(channel_id: str, max_pages: int = 5) -> list[str]:
         ).execute()
     except HttpError as e:
         console.print(f"[red]API error fetching uploads playlist: {e}[/red]")
-        return []
+        raise RuntimeError(f"YouTube API error fetching uploads playlist: {e.reason or e}")
 
     items = resp.get("items", [])
     if not items:
@@ -186,7 +202,7 @@ def fetch_video_details(video_ids: list[str], channel_id: str) -> list[dict]:
             ).execute()
         except HttpError as e:
             console.print(f"[red]API error fetching video batch: {e}[/red]")
-            continue
+            raise RuntimeError(f"YouTube API error fetching video details: {e.reason or e}")
 
         rows: list[dict] = []
         for item in resp.get("items", []):

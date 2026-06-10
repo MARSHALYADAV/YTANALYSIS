@@ -220,6 +220,11 @@ def dashboard():
             return redirect(url_for("home", msg="No channels found. Collect data first."))
         channel_id = channels[0]["channel_id"]
 
+    # Redirect to home with a clear error if the channel isn't in database
+    ch = db.get_channel(channel_id)
+    if not ch:
+        return redirect(url_for("home", msg=f"Channel {channel_id} not found in database. Please run collection first.", ok=0))
+
     from report import generate_html_report
     try:
         html_path = generate_html_report(channel_id, include_nlp=False)
@@ -304,6 +309,11 @@ def api_recommend(channel_id):
 @app.route("/report/<channel_id>")
 def full_report(channel_id):
     db.init_db()
+    # Redirect to home with a clear error if the channel isn't in database
+    ch = db.get_channel(channel_id)
+    if not ch:
+        return redirect(url_for("home", msg=f"Channel {channel_id} not found in database. Please run collection first.", ok=0))
+
     from report import generate_html_report
     try:
         path = generate_html_report(channel_id, include_nlp=False)
