@@ -389,10 +389,26 @@ def print_recommendations(
 
 # ── HTML Report ────────────────────────────────────────────────────────────────
 
-def generate_html_report(channel_id: Optional[str] = None) -> Path:
+def generate_html_report(
+    channel_id: Optional[str] = None,
+    include_nlp: bool = False,
+    insight_data: Optional[dict] = None,
+    recommendations: Optional[list] = None,
+    sentiment_result: Optional[dict] = None,
+    topic_data: Optional[list] = None,
+) -> Path:
     """
     Generate a self-contained HTML report with all 6 phases.
     Returns the path to the saved file.
+
+    Parameters
+    ----------
+    channel_id       : YouTube channel ID to report on (None = all channels)
+    include_nlp      : If True, run NLP topic extraction (slow, downloads models)
+    insight_data     : Pre-computed Gemini insight dict from gemini_insight.py
+    recommendations  : Pre-computed reco list from recommender.py
+    sentiment_result : Pre-computed sentiment dict from sentiment.py
+    topic_data       : Pre-computed topic list from nlp.py
     """
     # ── Gather data ───────────────────────────────────────────────────────────
     if channel_id:
@@ -406,6 +422,51 @@ def generate_html_report(channel_id: Optional[str] = None) -> Path:
 
     keywords = analyzer.trending_keywords(15)
     channels = analyzer.fastest_growing_channels(10)
+
+    # Automatically compute missing inputs on the fly if possible!
+    if channel_id:
+        # 1. Sentiment analysis (Phase 4)
+        if sentiment_result is None:
+            try:
+                import sentiment
+                sentiment_result = sentiment.analyze_comments(channel_id)
+            except Exception:
+                pass
+
+        # 2. Topic extraction (Phase 3)
+        if topic_data is None and include_nlp:
+            try:
+                import nlp
+                topic_data = nlp.extract_topics_from_titles(channel_id)
+            except Exception:
+                pass
+
+        # 3. Gemini Insights (Phase 5)
+        if insight_data is None:
+            try:
+                import gemini_insight
+                insight_data = gemini_insight.generate_channel_insights(
+                    channel_id,
+                    sentiment_data=sentiment_result,
+                    topic_data=topic_data
+                )
+            except Exception as e:
+                insight_data = {"error": f"Could not generate insights: {e}"}
+
+        # 4. Recommendations (Phase 6)
+        if recommendations is None:
+            try:
+                import recommender
+                if topic_data:
+                    recommendations = recommender.recommend_topics(
+                        channel_id, topic_data, sentiment_result
+                    )
+                else:
+                    recommendations = recommender.quick_recommend_from_keywords(
+                        channel_id, keywords, sentiment_result
+                    )
+            except Exception:
+                pass
 
     # Build JSON data blobs for Chart.js
     kw_labels  = json.dumps([k for k, _ in keywords])
@@ -452,6 +513,187 @@ def generate_html_report(channel_id: Optional[str] = None) -> Path:
               <div class="comp-val">{creator['growth_rate']:.1f}</div>
             </div>
           </div>
+        </div>
+        """
+
+    sentiment_html = ""
+    if sentiment_result and sentiment_result.get("total", 0) > 0:
+        pos = sentiment_result["positive"]["pct"]
+        neu = sentiment_result["neutral"]["pct"]
+        neg = sentiment_result["negative"]["pct"]
+        total = sentiment_result["total"]
+        
+        pos_sample = sentiment_result["samples"].get("positive", [])
+        neg_sample = sentiment_result["samples"].get("negative", [])
+        samples_html = ""
+        if pos_sample:
+            samples_html += f'<div class="sentiment-sample pos-sample"><strong>Positive:</strong> "{pos_sample[0]}"</div>'
+        if neg_sample:
+            samples_html += f'<div class="sentiment-sample neg-sample"><strong>Negative:</strong> "{neg_sample[0]}"</div>'
+
+        sentiment_html = f"""
+        <div class="card grid-2">
+          <div>
+            <h2>📊 <span>Audience Sentiment Analysis (Phase 4)</span></h2>
+            <div class="sentiment-grid">
+              <div class="sent-bar-wrap">
+                <span class="sent-label">Positive</span>
+                <div class="sent-bar"><div style="width:{pos}%;background:var(--green)"></div></div>
+                <span class="sent-pct">{pos}%</span>
+              </div>
+              <div class="sent-bar-wrap">
+                <span class="sent-label">Neutral</span>
+                <div class="sent-bar"><div style="width:{neu}%;background:var(--yellow)"></div></div>
+                <span class="sent-pct">{neu}%</span>
+              </div>
+              <div class="sent-bar-wrap">
+                <span class="sent-label">Negative</span>
+                <div class="sent-bar"><div style="width:{neg}%;background:var(--red)"></div></div>
+                <span class="sent-pct">{neg}%</span>
+              </div>
+            </div>
+            <div style="margin-top: 1rem; font-size: 0.85rem; color: var(--text-dim)">
+              Total comments analysed: <strong>{total}</strong>
+            </div>
+            <div style="margin-top: 1rem;">
+              {samples_html}
+            </div>
+          </div>
+          <div style="display:flex; justify-content:center; align-items:center;">
+            <div style="width:180px; height:180px; position:relative;">
+              <canvas id="sentChart"></canvas>
+            </div>
+          </div>
+        </div>
+        """
+    else:
+        sentiment_html = """
+        <div class="card">
+          <h2>📊 <span>Audience Sentiment Analysis (Phase 4)</span></h2>
+          <div class="empty">No sentiment data available. Enable comment fetching during data collection to view audience sentiment.</div>
+        </div>
+        """
+
+    gemini_html = ""
+    if insight_data and "sections" in insight_data:
+        sections = insight_data["sections"]
+        
+        def build_li(items):
+            return "".join(f"<li>{item}</li>" for item in items)
+            
+        summary_html = ""
+        if sections.get("summary"):
+            summary_html = f'<div class="gemini-summary">{" ".join(sections["summary"])}</div>'
+
+        gemini_html = f"""
+        <div class="card gemini-card">
+          <h2>🤖 <span>Gemini AI Strategic Insights (Phase 5)</span></h2>
+          {summary_html}
+          <div class="gemini-grid">
+            <div class="gemini-section gemini-strengths">
+              <div class="gsec-title">✅ Strengths</div>
+              <ul>{build_li(sections.get("strengths", []))}</ul>
+            </div>
+            <div class="gemini-section gemini-weaknesses">
+              <div class="gsec-title">⚠️ Weaknesses</div>
+              <ul>{build_li(sections.get("weaknesses", []))}</ul>
+            </div>
+            <div class="gemini-section gemini-opps">
+              <div class="gsec-title">🚀 Growth Opportunities</div>
+              <ul>{build_li(sections.get("opportunities", []))}</ul>
+            </div>
+            <div class="gemini-section gemini-ideas">
+              <div class="gsec-title">💡 Recommended Content Ideas</div>
+              <ul>{build_li(sections.get("content_ideas", []))}</ul>
+            </div>
+          </div>
+        </div>
+        """
+    elif insight_data and "error" in insight_data:
+        err_msg = insight_data["error"]
+        gemini_html = f"""
+        <div class="card gemini-card" style="border-color: rgba(239, 68, 68, 0.4)">
+          <h2>🤖 <span>Gemini AI Strategic Insights (Phase 5)</span></h2>
+          <div class="status-msg status-err" style="margin-bottom:1.5rem;">
+            {err_msg}
+          </div>
+          <p style="font-size:0.875rem; color:var(--text-dim); line-height:1.6">
+            To enable Phase 5 Gemini AI Insights, please ensure:
+            <br>1. You have created a free API key at <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent)">Google AI Studio</a>.
+            <br>2. Set <code>GEMINI_API_KEY</code> in your <code>.env</code> file.
+          </p>
+        </div>
+        """
+    else:
+        gemini_html = """
+        <div class="card gemini-card">
+          <h2>🤖 <span>Gemini AI Strategic Insights (Phase 5)</span></h2>
+          <div class="empty">Gemini Insights not loaded. Please configure your Gemini API Key in .env to enable AI intelligence.</div>
+        </div>
+        """
+
+    reco_labels = "[]"
+    reco_scores = "[]"
+    reco_html = ""
+    if recommendations:
+        reco_labels = json.dumps([r["topic"] for r in recommendations])
+        reco_scores = json.dumps([r["score"] for r in recommendations])
+        
+        reco_rows = ""
+        for r in recommendations:
+            kw_badges = "".join(f'<span class="kw-badge">{kw}</span>' for kw in r["keywords"][:3])
+            ex_list = "".join(f'<li>"{ex}"</li>' for ex in r["examples"])
+            ex_html = f'<ul class="reco-examples">{ex_list}</ul>' if r["examples"] else ""
+            
+            reco_rows += f"""
+            <tr>
+              <td class="rank">{r['rank']}</td>
+              <td>
+                <div style="font-weight:600;color:var(--text);">{r['topic']}</div>
+                <div style="margin-top:0.25rem;">{kw_badges}</div>
+                {ex_html}
+              </td>
+              <td class="score-cell {'score-high' if r['score']>=80 else 'score-mid' if r['score']>=60 else 'score-low'}">{r['score']}</td>
+              <td class="num-dim">{r['trend_component']:.1f}</td>
+              <td class="num-dim">{r['sent_component']:.1f}</td>
+              <td class="num-dim">{r['eng_component']:.1f}</td>
+            </tr>
+            """
+            
+        reco_html = f"""
+        <div class="card grid-2">
+          <div>
+            <h2>🎯 <span>Content Recommendations (Phase 6)</span></h2>
+            <p style="font-size:0.85rem; color:var(--text-dim); margin-bottom:1rem;">
+              Ranked topics based on: <code>score = trend×0.40 + sentiment×0.35 + engagement×0.25</code>
+            </p>
+            <table class="data-table" style="font-size:0.825rem;">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Topic & Keywords</th>
+                  <th>Score</th>
+                  <th>Trend</th>
+                  <th>Sentiment</th>
+                  <th>Engagement</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reco_rows}
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h2>📊 <span>Recommendation Score Breakdown</span></h2>
+            <canvas id="recoChart"></canvas>
+          </div>
+        </div>
+        """
+    else:
+        reco_html = """
+        <div class="card">
+          <h2>🎯 <span>Content Recommendations (Phase 6)</span></h2>
+          <div class="empty">No recommendations available. Analyze topics or keywords first.</div>
         </div>
         """
 
@@ -718,6 +960,52 @@ def generate_html_report(channel_id: Optional[str] = None) -> Path:
   .gemini-ideas       {{ border-top: 2px solid #a855f7; }}
 
   canvas {{ max-height: 320px; }}
+
+  /* Custom sentiment samples */
+  .sentiment-sample {{
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    margin-top: 0.5rem;
+    background: var(--surface2);
+    border-left: 3px solid var(--border);
+    font-style: italic;
+    color: var(--text-dim);
+  }}
+  .pos-sample {{ border-left-color: var(--green); }}
+  .neg-sample {{ border-left-color: var(--red); }}
+
+  /* Keywords and examples for recommendations */
+  .kw-badge {{
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    color: var(--accent);
+    border-radius: 4px;
+    margin-right: 0.25rem;
+  }}
+  .reco-examples {{
+    list-style: none;
+    margin-top: 0.4rem;
+    padding-left: 0.5rem;
+  }}
+  .reco-examples li {{
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    font-style: italic;
+    line-height: 1.4;
+    position: relative;
+    padding-left: 0.75rem;
+    border-bottom: none !important;
+  }}
+  .reco-examples li::before {{
+    content: "•";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+  }}
 
   /* Footer */
   footer {{

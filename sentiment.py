@@ -93,39 +93,71 @@ def analyze_texts(
     Run sentiment analysis on a list of strings.
     Returns a SentimentResult dict.
     """
+    import re
     if not texts:
         return _empty_result()
 
-    pipe = _get_pipeline()
+    try:
+        pipe = _get_pipeline()
+        use_pipeline = True
+    except Exception as e:
+        use_pipeline = False
+        from rich.console import Console
+        Console().print(
+            f"[yellow]Sentiment model could not be loaded ({e}). "
+            "Using fast lexicon fallback...[/yellow]"
+        )
+
     cleaned = [_preprocess(t) for t in texts if t and t.strip()]
     if not cleaned:
         return _empty_result()
 
-    # Cap at 1000 texts for speed
     cleaned = cleaned[:1000]
 
-    from rich.progress import track
-
-    results = []
-    for i in range(0, len(cleaned), batch_size):
-        batch = cleaned[i : i + batch_size]
-        try:
-            preds = pipe(batch, batch_size=batch_size)
-            results.extend(preds)
-        except Exception as e:
-            # Skip bad batches
-            results.extend([{"label": "LABEL_1", "score": 1.0}] * len(batch))
-
-    # Tally counts
     counts = {"positive": 0, "neutral": 0, "negative": 0}
     samples = {"positive": [], "neutral": [], "negative": []}
 
-    for text, pred in zip(cleaned, results):
-        raw_label = pred.get("label", "LABEL_1")
-        label     = _LABEL_MAP.get(raw_label, "neutral")
-        counts[label] += 1
-        if len(samples[label]) < 3:
-            samples[label].append(text[:120])
+    if use_pipeline:
+        results = []
+        for i in range(0, len(cleaned), batch_size):
+            batch = cleaned[i : i + batch_size]
+            try:
+                preds = pipe(batch, batch_size=batch_size)
+                results.extend(preds)
+            except Exception as e:
+                # Skip bad batches
+                results.extend([{"label": "LABEL_1", "score": 1.0}] * len(batch))
+
+        for text, pred in zip(cleaned, results):
+            raw_label = pred.get("label", "LABEL_1")
+            label     = _LABEL_MAP.get(raw_label, "neutral")
+            counts[label] += 1
+            if len(samples[label]) < 3:
+                samples[label].append(text[:120])
+    else:
+        # Lexicon fallback
+        pos_words = {
+            "great", "good", "love", "best", "awesome", "perfect", "amazing", "cool", "helpful", "thanks", "nice",
+            "excellent", "superb", "brilliant", "fantastic", "interesting", "useful", "like", "appreciate", "glad",
+            "wonderful", "recommend", "smart", "easy", "clear", "incredible", "favorite", "genius", "wow"
+        }
+        neg_words = {
+            "bad", "worst", "fail", "terrible", "boring", "suck", "hate", "wrong", "useless", "dislike", "horrible",
+            "waste", "annoying", "poor", "difficult", "stupid", "hard", "confusing", "slow", "broken", "sad"
+        }
+        for text in cleaned:
+            words = re.findall(r'\b\w+\b', text.lower())
+            pos_count = sum(1 for w in words if w in pos_words)
+            neg_count = sum(1 for w in words if w in neg_words)
+            if pos_count > neg_count:
+                label = "positive"
+            elif neg_count > pos_count:
+                label = "negative"
+            else:
+                label = "neutral"
+            counts[label] += 1
+            if len(samples[label]) < 3:
+                samples[label].append(text[:120])
 
     total = sum(counts.values())
 

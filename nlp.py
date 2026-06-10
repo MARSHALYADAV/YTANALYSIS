@@ -78,47 +78,99 @@ def _cluster_texts(
 ) -> list[dict]:
     """
     Embed texts with sentence-transformers, cluster with KMeans.
-    Returns a list of topic dicts.
+    Falls back to a keyword frequency based topic generator if ML packages fail or are missing.
     """
-    from sklearn.cluster import KMeans
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    import numpy as np
+    try:
+        from sklearn.cluster import KMeans
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        import numpy as np
+        model = _get_model()
+        use_ml = True
+    except Exception as e:
+        use_ml = False
+        from rich.console import Console
+        Console().print(f"[yellow]NLP models could not be loaded ({e}). Using fast lexicon fallback...[/yellow]")
 
     if len(texts) < n_topics:
         n_topics = max(2, len(texts) // 2)
 
-    model = _get_model()
-    embeddings = model.encode(texts, show_progress_bar=False)
+    if use_ml:
+        embeddings = model.encode(texts, show_progress_bar=False)
 
-    km = KMeans(n_clusters=n_topics, random_state=42, n_init="auto")
-    labels = km.fit_predict(embeddings)
+        km = KMeans(n_clusters=n_topics, random_state=42, n_init="auto")
+        labels = km.fit_predict(embeddings)
 
-    # Group texts by cluster
-    clusters: dict[int, list[str]] = {}
-    for idx, label in enumerate(labels):
-        clusters.setdefault(int(label), []).append(texts[idx])
+        # Group texts by cluster
+        clusters: dict[int, list[str]] = {}
+        for idx, label in enumerate(labels):
+            clusters.setdefault(int(label), []).append(texts[idx])
 
-    # TF-IDF keywords per cluster
-    topics = []
-    for cluster_id, cluster_texts in sorted(clusters.items(), key=lambda x: -len(x[1])):
-        joined = " ".join(cluster_texts)
-        tokens = _tokenize(joined)
-        token_freq = Counter(tokens)
+        # TF-IDF keywords per cluster
+        topics = []
+        for cluster_id, cluster_texts in sorted(clusters.items(), key=lambda x: -len(x[1])):
+            joined = " ".join(cluster_texts)
+            tokens = _tokenize(joined)
+            token_freq = Counter(tokens)
 
-        # Top keywords for this cluster
-        keywords = [w for w, _ in token_freq.most_common(6)]
+            # Top keywords for this cluster
+            keywords = [w for w, _ in token_freq.most_common(6)]
 
-        # Auto-label: capitalize top 2 keywords
-        label_words = [w.capitalize() for w in keywords[:2]]
-        label = " ".join(label_words) if label_words else f"Topic {cluster_id + 1}"
+            # Auto-label: capitalize top 2 keywords
+            label_words = [w.capitalize() for w in keywords[:2]]
+            label = " ".join(label_words) if label_words else f"Topic {cluster_id + 1}"
 
-        topics.append({
-            "id":       cluster_id,
-            "label":    label,
-            "keywords": keywords,
-            "size":     len(cluster_texts),
-            "examples": cluster_texts[:3],
-        })
+            topics.append({
+                "id":       cluster_id,
+                "label":    label,
+                "keywords": keywords,
+                "size":     len(cluster_texts),
+                "examples": cluster_texts[:3],
+            })
+    else:
+        # High quality keyword-based grouping fallback
+        all_tokens = []
+        for text in texts:
+            all_tokens.extend(_tokenize(text))
+        
+        freq = Counter(all_tokens)
+        top_words = [w for w, _ in freq.most_common(n_topics)]
+        
+        clusters = {word: [] for word in top_words}
+        clusters["Other Topics"] = []
+        
+        for text in texts:
+            assigned = False
+            text_lower = text.lower()
+            for word in top_words:
+                if f" {word} " in f" {text_lower} ":
+                    clusters[word].append(text)
+                    assigned = True
+                    break
+            if not assigned:
+                clusters["Other Topics"].append(text)
+                
+        # Remove empty clusters
+        clusters = {k: v for k, v in clusters.items() if v}
+        
+        topics = []
+        for idx, (topic_name, cluster_texts) in enumerate(clusters.items()):
+            joined = " ".join(cluster_texts)
+            tokens = _tokenize(joined)
+            token_freq = Counter(tokens)
+            
+            keywords = [w for w, _ in token_freq.most_common(7) if w != topic_name][:6]
+            if topic_name != "Other Topics":
+                keywords.insert(0, topic_name)
+                
+            label = topic_name.capitalize() if topic_name != "Other Topics" else "General Content"
+            
+            topics.append({
+                "id":       idx,
+                "label":    label,
+                "keywords": keywords,
+                "size":     len(cluster_texts),
+                "examples": cluster_texts[:3],
+            })
 
     # Sort by size descending
     return sorted(topics, key=lambda t: -t["size"])
